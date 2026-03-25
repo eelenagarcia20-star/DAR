@@ -1,33 +1,30 @@
 import socket
 import threading
 
-# Configuración para VirtualBox (Red Interna)
-HOST = '0.0.0.0'  # Escucha en todas las interfaces de la VM
+HOST = '0.0.0.0'
 PORT = 55555
+
+cola_espera = [] # Lista de (conn, addr)
+partidas = {}             
+lock = threading.Lock()
 
 class Partida:
     def __init__(self, jugadores):
-        self.jugadores = jugadores  # [conn_x, conn_o]
+        self.jugadores = jugadores # [conn_x, conn_o]
         self.tablero = [" "] * 9
-        self.turno = 0  # 0 para X, 1 para O
+        self.turno = 0 
 
     def hay_ganador(self):
-        v_ganadoras = [(0,1,2), (3,4,5), (6,7,8), (0,3,6), (1,4,7), (2,5,8), (0,4,8), (2,4,6)]
-        for a, b, c in v_ganadoras:
+        v = [(0,1,2), (3,4,5), (6,7,8), (0,3,6), (1,4,7), (2,5,8), (0,4,8), (2,4,6)]
+        for a, b, c in v:
             if self.tablero[a] == self.tablero[b] == self.tablero[c] != " ":
                 return self.tablero[a]
-        if " " not in self.tablero:
-            return "EMPATE"
-        return None
-
-# Globales para gestionar el estado
-esperando_jugador = None
-partidas = {}  # {socket_cliente: Partida}
-lock = threading.Lock()
+        return "EMPATE" if " " not in self.tablero else None
 
 def manejar_cliente(conn, addr):
-    global esperando_jugador
-    print(f"[NUEVA CONEXIÓN] {addr} conectado.")
+    global cola_espera
+    ip_actual = addr[0]
+    print(f"[CONEXIÓN] {ip_actual} conectado.")
     
     try:
         while True:
@@ -37,95 +34,64 @@ def manejar_cliente(conn, addr):
             for linea in data.split("\r\n"):
                 comando = linea.strip().split()
                 if not comando: continue
-
-                cmd = comando[0].upper()
-
-                # --- LÓGICA DE UNIRSE ---
-                if cmd == "JOIN":
+                
+                if comando[0].upper() == "JOIN":
                     with lock:
-                        if esperando_jugador is None:
-                            esperando_jugador = conn
+                        encontrado = False
+                        for i, (esperando_conn, esperando_addr) in enumerate(cola_espera):
+                            if esperando_addr[0] != ip_actual:
+                                rival_conn, rival_addr = cola_espera.pop(i)
+                                p = Partida([rival_conn, conn])
+                                partidas[rival_conn] = p
+                                partidas[conn] = p
+                                rival_conn.send("START PARTIDA X\r\n".encode())
+                                conn.send("START PARTIDA O\r\n".encode())
+                                encontrado = True
+                                break
+                        if not encontrado:
+                            if (conn, addr) not in cola_espera:
+                                cola_espera.append((conn, addr))
                             conn.send("WAITING\r\n".encode())
-                        else:
-                            # Creamos la partida con el que esperaba y el nuevo
-                            rival = esperando_jugador
-                            nueva_partida = Partida([rival, conn])
-                            partidas[rival] = nueva_partida
-                            partidas[conn] = nueva_partida
-                            esperando_jugador = None
-                            
-                            # Notificamos inicio: Rival es X, el actual es O
-                            rival.send("START PARTIDA X\r\n".encode())
-                            conn.send("START PARTIDA O\r\n".encode())
-                            print(f"[PARTIDA] Iniciada entre {rival.getpeername()} y {addr}")
 
-                # --- LÓGICA DE MOVIMIENTO ---
-                elif cmd == "MOVE":
-                    if conn not in partidas:
-                        conn.send("ERROR No estás en una partida\r\n".encode())
-                        continue
-                    
-                    p = partidas[conn]
-                    idx_jugador = p.jugadores.index(conn)
-                    
-                    if p.turno != idx_jugador:
-                        conn.send("ERROR No es tu turno\r\n".encode())
-                        continue
+                elif comando[0].upper() == "MOVE":
+                    if conn in partidas:
+                        p = partidas[conn]
+                        idx = p.jugadores.index(conn)
+                        if p.turno == idx:
+                            pos = int(comando[1])
+                            if p.tablero[pos] == " ":
+                                sym = "X" if idx == 0 else "O"
+                                p.tablero[pos] = sym
+                                p.turno = 1 - p.turno
+                                for j in p.jugadores: j.send(f"UPDATE {pos} {sym}\r\n".encode())
+                                res = p.hay_ganador()
+                                if res:
+                                    for j in p.jugadores: j.send(f"GAMEOVER {res}\r\n".encode())
+                                    del partidas[p.jugadores[0]]
+                                    del partidas[p.jugadores[1]]
 
-                    pos = int(comando[1])
-                    if p.tablero[pos] == " ":
-                        simbolo = "X" if idx_jugador == 0 else "O"
-                        p.tablero[pos] = simbolo
-                        
-                        # Notificar UPDATE a ambos
-                        msg_update = f"UPDATE {pos} {simbolo}\r\n"
-                        for j in p.jugadores:
-                            j.send(msg_update.encode())
-                        
-                        # Verificar si terminó
-                        resultado = p.hay_ganador()
-                        if resultado:
-                            final = f"GAMEOVER {resultado}\r\n"
-                            for j in p.jugadores:
-                                j.send(final.encode())
-                                if j in partidas: del partidas[j]
-                        else:
-                            p.turno = 1 - p.turno # Cambio de turno
-                    else:
-                        conn.send("ERROR Casilla ocupada\r\n".encode())
-
-    except Exception as e:
-        print(f"[ERROR] Con {addr}: {e}")
+    except:
+        pass
     finally:
         with lock:
-            if esperando_jugador == conn: esperando_jugador = None
+            # GESTIÓN DE DESCONEXIÓN
             if conn in partidas:
-                # Si uno se desconecta, avisar al otro y cerrar partida
                 p = partidas[conn]
                 for j in p.jugadores:
                     if j != conn:
-                        try: j.send("GAMEOVER DESCONEXIÓN\r\n".encode())
+                        try: j.send("GAMEOVER DESCONEXION\r\n".encode())
                         except: pass
                         if j in partidas: del partidas[j]
-                del partidas[conn]
+            if (conn, addr) in cola_espera:
+                cola_espera.remove((conn, addr))
         conn.close()
-        print(f"[DESCONEXIÓN] {addr} se ha ido.")
-
-def iniciar_servidor():
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        s.bind((HOST, PORT))
-        s.listen()
-        print(f"[LISTO] Servidor escuchando en {HOST}:{PORT}")
-    except Exception as e:
-        print(f"[ERROR BIND] {e}")
-        return
-
-    while True:
-        conn, addr = s.accept()
-        hilo = threading.Thread(target=manejar_cliente, args=(conn, addr))
-        hilo.start()
 
 if __name__ == "__main__":
-    iniciar_servidor()
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((HOST, PORT))
+    s.listen()
+    print("SERVIDOR ONLINE")
+    while True:
+        c, a = s.accept()
+        threading.Thread(target=manejar_cliente, args=(c, a), daemon=True).start()
