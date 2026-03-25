@@ -5,7 +5,7 @@ from tkinter import messagebox
 import queue
 
 # Configuración - Asegúrate de que coincida con el servidor
-HOST, PORT = '127.0.0.1', 55555
+HOST, PORT = '192.168.1.1', 55555
 
 class ClienteGrafico:
     def __init__(self):
