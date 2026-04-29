@@ -3,211 +3,91 @@ import java.net.*;
 import java.util.*;
 
 public class servidorRMI {
-
     static final int PORT = 55555;
 
-    static List<ClienteInfo> colaEspera = new ArrayList<>();
-    static Map<Socket, Partida> partidas = new HashMap<>();
-
-    static final Object lock = new Object();
-
-    static class ClienteInfo {
-        Socket socket;
-        String ip;
-
-        ClienteInfo(Socket socket, String ip) {
-            this.socket = socket;
-            this.ip = ip;
-        }
-    }
-
     static class Partida {
-        Socket[] jugadores;
         String[] tablero = new String[9];
-        int turno = 0;
+        boolean juegoActivo = true;
 
-        Partida(Socket j1, Socket j2) {
-            jugadores = new Socket[]{j1, j2};
-            Arrays.fill(tablero, " ");
-        }
+        Partida() { Arrays.fill(tablero, " "); }
 
         String hayGanador() {
-            int[][] comb = {
-                {0,1,2},{3,4,5},{6,7,8},
-                {0,3,6},{1,4,7},{2,5,8},
-                {0,4,8},{2,4,6}
-            };
-
-            for (int[] c : comb) {
-                if (!tablero[c[0]].equals(" ") &&
-                    tablero[c[0]].equals(tablero[c[1]]) &&
-                    tablero[c[1]].equals(tablero[c[2]])) {
+            int[][] combos = {{0,1,2},{3,4,5},{6,7,8},{0,3,6},{1,4,7},{2,5,8},{0,4,8},{2,4,6}};
+            for (int[] c : combos) {
+                if (!tablero[c[0]].equals(" ") && tablero[c[0]].equals(tablero[c[1]]) && tablero[c[1]].equals(tablero[c[2]]))
                     return tablero[c[0]];
-                }
             }
-
-            for (String s : tablero) {
-                if (s.equals(" ")) return null;
-            }
-
-            return "EMPATE";
-        }
-    }
-
-    static class ClienteHandler extends Thread {
-        Socket socket;
-        BufferedReader in;
-        BufferedWriter out;
-        String ip;
-
-        ClienteHandler(Socket socket) throws IOException {
-            this.socket = socket;
-            this.ip = socket.getInetAddress().getHostAddress();
-            this.in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            this.out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+            if (!Arrays.asList(tablero).contains(" ")) return "EMPATE";
+            return null;
         }
 
-        void enviar(String msg) {
-            try {
-                out.write(msg);
-                out.flush();
-            } catch (IOException ignored) {}
-        }
-
-        public void run() {
-            System.out.println("[CONEXIÓN] " + ip + " conectado.");
-
-            try {
-                String linea;
-                while ((linea = in.readLine()) != null) {
-                    String[] partes = linea.trim().split(" ");
-                    if (partes.length == 0) continue;
-
-                    String comando = partes[0].toUpperCase();
-
-                    if (comando.equals("JOIN")) {
-                        manejarJoin();
-                    } else if (comando.equals("MOVE")) {
-                        manejarMove(partes);
-                    } else {
-                        enviar("ERROR Comando desconocido\r\n");
-                    }
-                }
-            } catch (Exception ignored) {
-            } finally {
-                desconectar();
+        void movimientoIA() {
+            List<Integer> libres = new ArrayList<>();
+            for (int i = 0; i < 9; i++) if (tablero[i].equals(" ")) libres.add(i);
+            if (!libres.isEmpty()) {
+                tablero[libres.get(new Random().nextInt(libres.size()))] = "O";
             }
         }
 
-        void manejarJoin() {
-            synchronized (lock) {
-                boolean encontrado = false;
-
-                for (int i = 0; i < colaEspera.size(); i++) {
-                    ClienteInfo c = colaEspera.get(i);
-                    if (!c.ip.equals(ip)) {
-                        colaEspera.remove(i);
-
-                        Partida p = new Partida(c.socket, socket);
-                        partidas.put(c.socket, p);
-                        partidas.put(socket, p);
-
-                        enviarA(c.socket, "START PARTIDA X\r\n");
-                        enviar("START PARTIDA O\r\n");
-
-                        encontrado = true;
-                        break;
-                    }
-                }
-
-                if (!encontrado) {
-                    colaEspera.add(new ClienteInfo(socket, ip));
-                    enviar("WAITING\r\n");
-                }
+        // CAMBIO: Usamos "_" para representar el vacío en la red
+        String estado() {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 9; i++) {
+                sb.append(tablero[i].equals(" ") ? "_" : tablero[i]);
+                if (i < 8) sb.append(",");
             }
-        }
-
-        void manejarMove(String[] partes) {
-            synchronized (lock) {
-                if (!partidas.containsKey(socket)) {
-                    enviar("ERROR No estas en una partida\r\n");
-                    return;
-                }
-
-                try {
-                    int pos = Integer.parseInt(partes[1]);
-                    Partida p = partidas.get(socket);
-
-                    int idx = (p.jugadores[0] == socket) ? 0 : 1;
-
-                    if (p.turno != idx) {
-                        enviar("ERROR No es tu turno\r\n");
-                        return;
-                    }
-
-                    if (pos < 0 || pos > 8 || !p.tablero[pos].equals(" ")) {
-                        enviar("ERROR Movimiento invalido\r\n");
-                        return;
-                    }
-
-                    String sym = (idx == 0) ? "X" : "O";
-                    p.tablero[pos] = sym;
-                    p.turno = 1 - p.turno;
-
-                    String msg = "UPDATE " + pos + " " + sym + "\r\n";
-                    for (Socket j : p.jugadores) enviarA(j, msg);
-
-                    String res = p.hayGanador();
-                    if (res != null) {
-                        for (Socket j : p.jugadores)
-                            enviarA(j, "GAMEOVER " + res + "\r\n");
-
-                        partidas.remove(p.jugadores[0]);
-                        partidas.remove(p.jugadores[1]);
-                    }
-
-                } catch (Exception e) {
-                    enviar("ERROR Formato MOVE <0-8>\r\n");
-                }
-            }
-        }
-
-        void desconectar() {
-            synchronized (lock) {
-                if (partidas.containsKey(socket)) {
-                    Partida p = partidas.get(socket);
-
-                    for (Socket j : p.jugadores) {
-                        if (j != socket) {
-                            enviarA(j, "GAMEOVER DESCONEXION\r\n");
-                        }
-                        partidas.remove(j);
-                    }
-                }
-
-                colaEspera.removeIf(c -> c.socket == socket);
-
-                try { socket.close(); } catch (IOException ignored) {}
-            }
-        }
-
-        void enviarA(Socket s, String msg) {
-            try {
-                BufferedWriter w = new BufferedWriter(
-                        new OutputStreamWriter(s.getOutputStream()));
-                w.write(msg);
-                w.flush();
-            } catch (IOException ignored) {}
+            return sb.toString();
         }
     }
 
     public static void main(String[] args) throws Exception {
         ServerSocket server = new ServerSocket(PORT);
-        System.out.println("SERVIDOR ONLINE EN PUERTO " + PORT);
+        System.out.println("Servidor de Tres en Raya listo...");
 
         while (true) {
             Socket cliente = server.accept();
-            new ClienteHandler(cliente).start();
+            new Thread(() -> manejar(cliente)).start();
+        }
+    }
+
+    static void manejar(Socket socket) {
+        try (
+            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            PrintWriter out = new PrintWriter(socket.getOutputStream(), true)
+        ) {
+            Partida partida = new Partida();
+            String linea;
+
+            while ((linea = in.readLine()) != null) {
+                String[] p = linea.split(" ");
+                if (p.length == 0) continue;
+                String cmd = p[0].toUpperCase();
+
+                if (cmd.equals("START")) {
+                    partida = new Partida();
+                    out.println("STATE " + partida.estado());
+                } 
+                else if (cmd.equals("MOVE") && partida.juegoActivo) {
+                    int pos = Integer.parseInt(p[1]);
+                    if (partida.tablero[pos].equals(" ")) {
+                        partida.tablero[pos] = "X";
+                        String res = partida.hayGanador();
+                        
+                        if (res == null) { // Si X no ganó, mueve la IA
+                            partida.movimientoIA();
+                            res = partida.hayGanador();
+                        }
+                        
+                        out.println("STATE " + partida.estado());
+                        if (res != null) {
+                            out.println("RESULT " + res);
+                            partida.juegoActivo = false;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("Cliente desconectado.");
         }
     }
 }
