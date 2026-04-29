@@ -4,8 +4,7 @@ import tkinter as tk
 from tkinter import messagebox
 import queue
 
-# IMPORTANTE: Cambia '127.0.0.1' por la IP del servidor si usas dos PCs
-HOST, PORT = '127.0.0.1', 55555 
+HOST, PORT = '192.168.1.1', 55555 
 
 class ClienteGrafico:
     def __init__(self):
