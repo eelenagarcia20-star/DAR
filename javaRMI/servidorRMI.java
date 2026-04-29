@@ -1,93 +1,73 @@
-import java.io.*;
-import java.net.*;
+import java.rmi.RemoteException;
+import java.rmi.registry.LocateRegistry;
+import java.rmi.registry.Registry;
+import java.rmi.server.UnicastRemoteObject;
 import java.util.*;
 
-public class servidorRMI {
-    static final int PORT = 55555;
+public class servidorRMI extends UnicastRemoteObject implements interfaz {
+    private String[] tablero = new String[9];
+    private boolean juegoActivo = false;
 
-    static class Partida {
-        String[] tablero = new String[9];
-        boolean juegoActivo = true;
+    protected servidorRMI() throws RemoteException {
+        super();
+        Arrays.fill(tablero, "_");
+    }
 
-        Partida() { Arrays.fill(tablero, " "); }
+    @Override
+    public synchronized String iniciarJuego() throws RemoteException {
+        Arrays.fill(tablero, "_");
+        juegoActivo = true;
+        System.out.println("Partida iniciada.");
+        return String.join(",", tablero);
+    }
 
-        String hayGanador() {
-            int[][] combos = {{0,1,2},{3,4,5},{6,7,8},{0,3,6},{1,4,7},{2,5,8},{0,4,8},{2,4,6}};
-            for (int[] c : combos) {
-                if (!tablero[c[0]].equals(" ") && tablero[c[0]].equals(tablero[c[1]]) && tablero[c[1]].equals(tablero[c[2]]))
-                    return tablero[c[0]];
-            }
-            if (!Arrays.asList(tablero).contains(" ")) return "EMPATE";
-            return null;
+    @Override
+    public synchronized String realizarMovimiento(int pos) throws RemoteException {
+        if (!juegoActivo || !tablero[pos].equals("_")) return "ERROR";
+
+        tablero[pos] = "X"; // Jugador
+        
+        String res = comprobarEstado();
+        if (res == null) {
+            movimientoIA();
+            res = comprobarEstado();
         }
 
-        void movimientoIA() {
-            List<Integer> libres = new ArrayList<>();
-            for (int i = 0; i < 9; i++) if (tablero[i].equals(" ")) libres.add(i);
-            if (!libres.isEmpty()) {
-                tablero[libres.get(new Random().nextInt(libres.size()))] = "O";
-            }
+        String estadoStr = String.join(",", tablero);
+        if (res != null) {
+            juegoActivo = false;
+            return "RESULT:" + res + "|" + estadoStr;
         }
+        return "STATE:" + estadoStr;
+    }
 
-        // CAMBIO: Usamos "_" para representar el vacío en la red
-        String estado() {
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < 9; i++) {
-                sb.append(tablero[i].equals(" ") ? "_" : tablero[i]);
-                if (i < 8) sb.append(",");
-            }
-            return sb.toString();
+    private void movimientoIA() {
+        List<Integer> libres = new ArrayList<>();
+        for (int i = 0; i < 9; i++) if (tablero[i].equals("_")) libres.add(i);
+        if (!libres.isEmpty()) {
+            tablero[libres.get(new Random().nextInt(libres.size()))] = "O";
         }
     }
 
-    public static void main(String[] args) throws Exception {
-        ServerSocket server = new ServerSocket(PORT);
-        System.out.println("Servidor de Tres en Raya listo...");
-
-        while (true) {
-            Socket cliente = server.accept();
-            new Thread(() -> manejar(cliente)).start();
+    private String comprobarEstado() {
+        int[][] combos = {{0,1,2},{3,4,5},{6,7,8},{0,3,6},{1,4,7},{2,5,8},{0,4,8},{2,4,6}};
+        for (int[] c : combos) {
+            if (!tablero[c[0]].equals("_") && tablero[c[0]].equals(tablero[c[1]]) && tablero[c[1]].equals(tablero[c[2]]))
+                return tablero[c[0]];
         }
+        if (!Arrays.asList(tablero).contains("_")) return "EMPATE";
+        return null;
     }
 
-    static void manejar(Socket socket) {
-        try (
-            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            PrintWriter out = new PrintWriter(socket.getOutputStream(), true)
-        ) {
-            Partida partida = new Partida();
-            String linea;
-
-            while ((linea = in.readLine()) != null) {
-                String[] p = linea.split(" ");
-                if (p.length == 0) continue;
-                String cmd = p[0].toUpperCase();
-
-                if (cmd.equals("START")) {
-                    partida = new Partida();
-                    out.println("STATE " + partida.estado());
-                } 
-                else if (cmd.equals("MOVE") && partida.juegoActivo) {
-                    int pos = Integer.parseInt(p[1]);
-                    if (partida.tablero[pos].equals(" ")) {
-                        partida.tablero[pos] = "X";
-                        String res = partida.hayGanador();
-                        
-                        if (res == null) { // Si X no ganó, mueve la IA
-                            partida.movimientoIA();
-                            res = partida.hayGanador();
-                        }
-                        
-                        out.println("STATE " + partida.estado());
-                        if (res != null) {
-                            out.println("RESULT " + res);
-                            partida.juegoActivo = false;
-                        }
-                    }
-                }
-            }
+    public static void main(String[] args) {
+        try {
+            // System.setProperty("java.rmi.server.hostname", "172.17.97.155");
+            servidorRMI obj = new servidorRMI();
+            Registry registry = LocateRegistry.createRegistry(55555);
+            registry.rebind("TresEnRaya", obj);
+            System.out.println("servidorRMI listo.");
         } catch (Exception e) {
-            System.out.println("Cliente desconectado.");
+            e.printStackTrace();
         }
     }
 }
